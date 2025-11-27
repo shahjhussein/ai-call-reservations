@@ -6,6 +6,8 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from dotenv import load_dotenv
 from openai import OpenAI
+from fastapi.middleware.cors import CORSMiddleware
+
 
 load_dotenv()
 
@@ -15,6 +17,16 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI()
+
+# --- CORS FIX FOR LOVABLE ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],     # Allow all domains (or restrict if you want)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 BASE_URL = "https://ai-call-reservations.onrender.com"
 
