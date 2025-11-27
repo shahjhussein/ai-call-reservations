@@ -3,3 +3,4 @@ uvicorn[standard]==0.38.0
 twilio==9.8.7
 openai==2.8.1
 python-dotenv==1.2.1
+python-multipart
