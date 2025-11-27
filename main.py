@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -17,8 +18,10 @@ app = FastAPI()
 
 BASE_URL = "https://ai-call-reservations.onrender.com"
 
-# Track per-call reservation data
+# Track per-call reservation data (active calls)
 reservation_state = {}
+# Store confirmed reservations (for UI)
+confirmed_reservations = []
 
 SYSTEM_PROMPT = """
 You are an extraction-only assistant for a voice reservation system.
@@ -65,6 +68,15 @@ def next_question(data):
 @app.get("/")
 def home():
     return {"status": "ok"}
+
+
+@app.get("/reservations")
+def list_reservations():
+    """
+    Return all confirmed reservations.
+    This is what your Lovable UI will call.
+    """
+    return {"reservations": confirmed_reservations}
 
 
 @app.post("/incoming-call", response_class=Response)
@@ -163,9 +175,15 @@ async def process_speech(request: Request):
 
     twiml = VoiceResponse()
 
-    # If all fields collected → confirm and end
+    # If all fields collected → confirm, store, and end
     if not question:
-        final = current
+        final = current.copy()
+        final["call_sid"] = call_sid
+        final["created_at"] = datetime.utcnow().isoformat() + "Z"
+
+        confirmed_reservations.append(final)
+        print("CONFIRMED RESERVATIONS:", confirmed_reservations)
+
         twiml.say(
             f"Thanks {final['name']}! Your reservation for {final['party_size']} guests "
             f"on {final['date']} at {final['time']} has been recorded. "
@@ -174,7 +192,7 @@ async def process_speech(request: Request):
         )
         twiml.hangup()
 
-        # Cleanup
+        # Cleanup active state
         reservation_state.pop(call_sid, None)
         return Response(str(twiml), media_type="application/xml")
 
