@@ -19,15 +19,14 @@ BASE_URL = "https://ai-call-reservations.onrender.com"
 
 # Track per-call reservation data
 reservation_state = {}
-conversation_state = {}  # memory for extraction
-
 
 SYSTEM_PROMPT = """
-You are an extraction-only assistant. 
-You NEVER ask questions. You NEVER give instructions.
-You ONLY extract information from what the user says.
+You are an extraction-only assistant for a voice reservation system.
 
-Given any user message, extract ONLY these fields if present:
+You NEVER ask questions and you NEVER chat.
+
+Your ONLY job is:
+Given a SINGLE user message, extract these fields IF they are present:
 
 {
   "name": "",
@@ -38,37 +37,20 @@ Given any user message, extract ONLY these fields if present:
 }
 
 Rules:
-- If a field is not mentioned, leave it as an empty string.
-- DO NOT ask questions.
-- DO NOT add explanations.
-- DO NOT format anything except the JSON.
+- Always respond with EXACTLY one JSON object.
+- No markdown, no ``` fences, no text before or after JSON.
+- If a field is not clearly mentioned, leave it as an empty string "".
+- Do NOT infer or guess missing fields.
+- Do NOT ask questions.
+- Do NOT explain anything.
 - Output ONLY valid JSON.
 """
-
-
-@app.get("/")
-def home():
-    return {"status": "ok"}
-
-
-@app.post("/incoming-call", response_class=Response)
-async def incoming_call():
-    twiml = VoiceResponse()
-
-    gather = Gather(
-        input="speech",
-        action=f"{BASE_URL}/process-speech",
-        speech_timeout="auto"
-    )
-    gather.say("Hello! I can help you make a reservation. How may I assist you today?")
-    twiml.append(gather)
-
-    return Response(str(twiml), media_type="application/xml")
-
+    
 
 def next_question(data):
+    """Return the next missing field as a friendly question."""
     if not data.get("name"):
-        return "Sure! What name should I put down for the reservation?"
+        return "Sure! Please say your full name now, for example: John Smith."
     if not data.get("date"):
         return "Great! What date would you like the reservation for?"
     if not data.get("time"):
@@ -80,8 +62,34 @@ def next_question(data):
     return None
 
 
+@app.get("/")
+def home():
+    return {"status": "ok"}
+
+
+@app.post("/incoming-call", response_class=Response)
+async def incoming_call():
+    """Initial greeting."""
+    twiml = VoiceResponse()
+
+    gather = Gather(
+        input="speech",
+        action=f"{BASE_URL}/process-speech",
+        speech_timeout="auto",
+        language="en-GB"
+    )
+    gather.say(
+        "Hello! I can help you make a reservation. How may I assist you today?",
+        voice="Polly.Amy"
+    )
+    twiml.append(gather)
+
+    return Response(str(twiml), media_type="application/xml")
+
+
 @app.post("/process-speech", response_class=Response)
 async def process_speech(request: Request):
+    """Handle speech from the caller."""
     form = await request.form()
 
     speech = form.get("SpeechResult", "").strip()
@@ -89,78 +97,95 @@ async def process_speech(request: Request):
 
     print(f"\nCALL {call_sid} - USER SAID: {speech}")
 
-    # Create State If Not Exists
+    # Create reservation state if new caller
     if call_sid not in reservation_state:
         reservation_state[call_sid] = {
             "name": None,
             "date": None,
             "time": None,
             "party_size": None,
-            "notes": None
+            "notes": None,
         }
 
-    if call_sid not in conversation_state:
-        conversation_state[call_sid] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
-
-    # If no speech
+    # If silence or noise
     if not speech:
         twiml = VoiceResponse()
         gather = Gather(
             input="speech",
-            action=f"{BASE_URL}/process-speech"
+            action=f"{BASE_URL}/process-speech",
+            language="en-GB"
         )
-        gather.say("Sorry, could you repeat that?")
+        gather.say(
+            "Sorry, I didn't quite catch that. Could you say that again?",
+            voice="Polly.Amy"
+        )
         twiml.append(gather)
         return Response(str(twiml), media_type="application/xml")
 
-    # Run extraction AI
-    conversation_state[call_sid].append({"role": "user", "content": speech})
-
+    # ---- STRICT AI EXTRACTION (stateless) ----
+    extracted = {}
     try:
-        result = client.chat.completions.create(
+        completion = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=conversation_state[call_sid],
-            temperature=0.0
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": speech},
+            ],
         )
-        extracted_json = result.choices[0].message.content.strip()
-        extracted = json.loads(extracted_json)
+        raw = completion.choices[0].message.content.strip()
+        print("RAW EXTRACTION:", raw)
+
+        # Strip markdown fences if model adds them
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+
+        extracted = json.loads(raw)
+
     except Exception as e:
         print("Extraction error:", e)
         extracted = {}
 
-    # Update reservation fields if extracted
+    # Update reservation state with extracted fields
+    current = reservation_state[call_sid]
+
     for field in ["name", "date", "time", "party_size", "notes"]:
-        if extracted.get(field):
-            reservation_state[call_sid][field] = extracted[field]
+        value = extracted.get(field)
+        if isinstance(value, str) and value.strip():
+            current[field] = value.strip()
 
-    print("Current Reservation:", reservation_state[call_sid])
+    print("Current Reservation:", current)
 
-    # Determine next question
-    question = next_question(reservation_state[call_sid])
+    # Decide what to ask next
+    question = next_question(current)
 
     twiml = VoiceResponse()
 
+    # If all fields collected → confirm and end
     if not question:
-        final = reservation_state[call_sid]
+        final = current
         twiml.say(
             f"Thanks {final['name']}! Your reservation for {final['party_size']} guests "
             f"on {final['date']} at {final['time']} has been recorded. "
-            "We look forward to seeing you!"
+            "We look forward to seeing you!",
+            voice="Polly.Amy"
         )
         twiml.hangup()
+
+        # Cleanup
         reservation_state.pop(call_sid, None)
-        conversation_state.pop(call_sid, None)
         return Response(str(twiml), media_type="application/xml")
 
-    # Ask the NEXT question only
+    # Ask the next friendly question
     gather = Gather(
         input="speech",
         action=f"{BASE_URL}/process-speech",
-        speech_timeout="auto"
+        speech_timeout="auto",
+        language="en-GB"
     )
-    gather.say(question)
+    gather.say(question, voice="Polly.Amy")
     twiml.append(gather)
 
     return Response(str(twiml), media_type="application/xml")
